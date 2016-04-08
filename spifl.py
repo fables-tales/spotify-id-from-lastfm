@@ -5,90 +5,85 @@ import sys
 from bs4 import BeautifulSoup
 import os
 import itertools
-
-def grouper(iterable, n, fillvalue=None):
-    "grouper(3, 'ABCDEFG', 'x') --> ABC DEF Gxx"
-    args = [iter(iterable)] * n
-    return itertools.izip_longest(fillvalue=fillvalue, *args)
-
+from db import database_connection
 
 logging.basicConfig(stream=sys.stdout, level=logging.WARN, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-
-def resume(lastfm_ids):
-    lines_passed = 0
-    if os.path.isfile(sys.argv[2]):
-        file_lines = open(sys.argv[2]).readlines()
-        last_line = None
-        for last_line in file_lines:
-            pass
-
-        last_lastfm_id = last_line.split(",")[0]
-        logging.warn("Resuming lastfm pull with lastfm id %s", last_lastfm_id)
-
-        lastfm_id = None
-        while lastfm_ids[0].strip() != last_lastfm_id:
-            lines_passed += 1
-            lastfm_ids = lastfm_ids[1:]
-    else:
-        logging.warn("Starting new lastfm scrape")
-
-    return lines_passed
 
 def report_progress(offset, lines_in_target):
     logging.warn("Progress: processed: %d\ttotal: %d\tpercent complete: %f" % (offset, lines_in_target, offset*100.0/lines_in_target))
 
 
 def spotify_id_from_lastfm_page(url):
-
     try:
-        response = requests.get(url).text
-    except requests.exceptions.ConnectionError:
-        # bad retry
-        response = requests.get(url).text
-
-    soup = BeautifulSoup(response, "html.parser")
-
-    maybe_spotify_id = soup.findAll("a", {"class": "image-overlay-playlink-link"})
-
-    if len(maybe_spotify_id) > 0:
         try:
-            spotify_id = maybe_spotify_id[0].attrs["data-spotify-id"]
-        except KeyError:
-            spotify_id = "null"
-    else:
-        spotify_id = "null"
+            response = requests.get(url).text
+        except requests.exceptions.ConnectionError:
+            # bad retry
+            response = requests.get(url).text
 
-    return spotify_id
+        soup = BeautifulSoup(response, "html.parser")
+
+        maybe_spotify_id = soup.findAll("a", {"class": "image-overlay-playlink-link"})
+
+        if len(maybe_spotify_id) > 0:
+            try:
+                spotify_id = maybe_spotify_id[0].attrs["data-spotify-id"]
+            except KeyError:
+                spotify_id = None
+        else:
+            spotify_id = None
+
+        return spotify_id
+    except KeyboardError:
+        exit(1)
 
 def build_line_from_id(lastfm_id):
     lastfm_id = lastfm_id.strip()
     url = "http://last.fm/%s" % (lastfm_id)
     spotify_id = spotify_id_from_lastfm_page(url)
-    return lastfm_id + "," + spotify_id + "\n"
+    return (lastfm_id, spotify_id)
+
+def update_ids(ids):
+    conn = database_connection()
+    for (lastfm_id, spotify_id) in ids:
+        cur = conn.cursor()
+        cur.execute("update scrobbles set spotify_id=%s, has_spotify_id=%s where lastfm_id=%s", (spotify_id, True, lastfm_id))
+        conn.commit()
+
+def get_lastfm_ids_without_spotify(group_size):
+    conn = database_connection()
+    cur = conn.cursor()
+    cur.execute("select lastfm_id from scrobbles where has_spotify_id=false limit %s" % group_size)
+
+    return [x[0] for x in cur]
+
+def get_total_scrobbles():
+    conn = database_connection()
+    cur = conn.cursor()
+    cur.execute("select count(*) from scrobbles")
+    return cur.next()[0]
+
+def with_ids():
+    conn = database_connection()
+    cur = conn.cursor()
+    cur.execute("select count(*) from scrobbles where has_spotify_id=true")
+    return cur.next()[0]
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print "Usage: python spifl.py input_file output_file"
-        sys.exit(1)
-
-    lines_in_target = len(open(sys.argv[1]).readlines())
-
-    lastfm_ids = open(sys.argv[1]).readlines()
-    offset = resume(lastfm_ids)
-
     group_size = 8
-
     p = Pool(group_size)
+    lines_in_target = get_total_scrobbles()
 
-    with open(sys.argv[2], "a") as writer:
-        for group in grouper(lastfm_ids, group_size):
-            group = list(group)
-            lines = p.map(build_line_from_id, group)
-            for line in lines:
-                writer.write(line)
-                writer.flush()
-                offset += 1
+    have_group = True
+    group = get_lastfm_ids_without_spotify(group_size)
+    offset = 0
+    while len(group) > 0:
+        group = get_lastfm_ids_without_spotify(group_size)
+        lines = p.map(build_line_from_id, group)
+        update_ids(lines)
 
-            if offset % (group_size*4) == 0:
-                report_progress(offset, lines_in_target)
+        offset += len(lines)
+
+        if offset % (group_size*4) == 0:
+            report_progress(with_ids(), lines_in_target)
