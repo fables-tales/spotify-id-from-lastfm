@@ -90,5 +90,5 @@ if __name__ == "__main__":
                 writer.flush()
                 offset += 1
 
-            if offset % 100 == 0:
+            if offset % (group_size*4) == 0:
                 report_progress(offset, lines_in_target)
