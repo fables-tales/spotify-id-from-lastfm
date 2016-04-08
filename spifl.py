@@ -1,8 +1,16 @@
 import requests
 import logging
+from multiprocessing import Pool
 import sys
 from bs4 import BeautifulSoup
 import os
+import itertools
+
+def grouper(iterable, n, fillvalue=None):
+    "grouper(3, 'ABCDEFG', 'x') --> ABC DEF Gxx"
+    args = [iter(iterable)] * n
+    return itertools.izip_longest(fillvalue=fillvalue, *args)
+
 
 logging.basicConfig(stream=sys.stdout, level=logging.WARN, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
@@ -32,17 +40,32 @@ def report_progress(offset, lines_in_target):
 
 def spotify_id_from_lastfm_page(url):
 
-    response = requests.get(url).text
+    try:
+        response = requests.get(url).text
+    except requests.exceptions.ConnectionError:
+        # bad retry
+        response = requests.get(url).text
+
     soup = BeautifulSoup(response, "html.parser")
 
     maybe_spotify_id = soup.findAll("a", {"class": "image-overlay-playlink-link"})
 
     if len(maybe_spotify_id) > 0:
-        spotify_id = maybe_spotify_id[0].attrs["data-spotify-id"]
+        try:
+            spotify_id = maybe_spotify_id[0].attrs["data-spotify-id"]
+        except KeyError:
+            spotify_id = "null"
     else:
         spotify_id = "null"
 
     return spotify_id
+
+def build_line_from_id(lastfm_id):
+    lastfm_id = lastfm_id.strip()
+    url = "http://last.fm/%s" % (lastfm_id)
+    spotify_id = spotify_id_from_lastfm_page(url)
+    return lastfm_id + "," + spotify_id + "\n"
+
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
@@ -54,14 +77,18 @@ if __name__ == "__main__":
     lastfm_ids = open(sys.argv[1]).readlines()
     offset = resume(lastfm_ids)
 
-    with open(sys.argv[2], "a") as writer:
-        for lastfm_id in lastfm_ids:
-            lastfm_id = lastfm_id.strip()
-            url = "http://last.fm/%s" % (lastfm_id)
-            spotify_id = spotify_id_from_lastfm_page(url)
-            writer.write(lastfm_id + "," + spotify_id + "\n")
-            writer.flush()
+    group_size = 8
 
-            offset += 1
+    p = Pool(group_size)
+
+    with open(sys.argv[2], "a") as writer:
+        for group in grouper(lastfm_ids, group_size):
+            group = list(group)
+            lines = p.map(build_line_from_id, group)
+            for line in lines:
+                writer.write(line)
+                writer.flush()
+                offset += 1
+
             if offset % 100 == 0:
                 report_progress(offset, lines_in_target)
