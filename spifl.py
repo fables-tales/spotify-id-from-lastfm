@@ -34,7 +34,7 @@ def spotify_id_from_lastfm_page(url):
             spotify_id = None
 
         return spotify_id
-    except KeyboardError:
+    except KeyboardInterrupt:
         exit(1)
 
 def build_line_from_id(lastfm_id):
